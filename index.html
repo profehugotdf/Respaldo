@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Backup</title>
+<style>
+  :root{
+    --bg:#0c1015; --bg2:#141a22; --card:#1a212b; --card2:#212a36; --borde:#2a3441;
+    --texto:#e7edf3; --texto-sec:#8fa0b3; --acento:#3ddcc4; --acento2:#5ab0ff;
+    --ok:#3ddc84; --mal:#ff5470; --radio:14px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0; padding:0; background:var(--bg); color:var(--texto);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  body{padding-bottom:40px;}
+  header{position:sticky; top:0; z-index:10; background:linear-gradient(180deg,var(--bg) 80%,transparent);
+    padding:16px 16px 8px;}
+  h1{margin:0 0 2px; font-size:22px; font-weight:800; display:flex; align-items:center; gap:8px;}
+  .sub{color:var(--texto-sec); font-size:12.5px; margin-bottom:12px;}
+  nav.tabs{display:flex; gap:6px;}
+  nav.tabs button{flex:1; padding:10px 4px; border:1px solid var(--borde); background:var(--bg2);
+    color:var(--texto-sec); border-radius:12px; font-size:13px; font-weight:700; cursor:pointer;}
+  nav.tabs button.activa{background:linear-gradient(135deg,var(--acento),var(--acento2)); color:#04231f; border-color:transparent;}
+  main{padding:4px 16px 16px;}
+  section{display:none;} section.activa{display:block;}
+  .card{background:var(--card); border:1px solid var(--borde); border-radius:var(--radio); padding:14px; margin-bottom:12px;}
+  .card h2{margin:0 0 10px; font-size:14px; text-transform:uppercase; letter-spacing:.6px; color:var(--texto-sec); font-weight:700;}
+  input[type=text]{width:100%; background:var(--card2); border:1px solid var(--borde); color:var(--texto);
+    border-radius:10px; padding:10px 11px; font-size:15px; margin-bottom:10px;}
+  input:focus{outline:none; border-color:var(--acento);}
+  .fila{display:flex; gap:8px; margin-bottom:10px;}
+  .fila > *{flex:1;}
+  button.btn{border:none; border-radius:12px; padding:12px 14px; font-size:14.5px; font-weight:700; cursor:pointer;}
+  .btn-primario{width:100%; background:linear-gradient(135deg,var(--acento),var(--acento2)); color:#04231f;}
+  .btn-secundario{width:100%; background:var(--card2); color:var(--texto); border:1px solid var(--borde);}
+  .btn-mini{background:var(--card2); color:var(--texto-sec); border:1px solid var(--borde); padding:9px 10px; font-size:12.5px; border-radius:9px;}
+  .item-clave{display:flex; align-items:center; gap:10px; padding:10px 4px; border-bottom:1px solid var(--borde); font-size:13.5px; cursor:pointer;}
+  .item-clave:last-child{border-bottom:none;}
+  .item-clave input[type=checkbox]{width:20px; height:20px; accent-color:var(--acento); margin:0; flex-shrink:0;}
+  .item-clave .nombre{flex:1; word-break:break-word;}
+  .item-clave .peso{color:var(--texto-sec); font-size:11px; flex-shrink:0;}
+  .item-clave .pisa{color:var(--mal); font-size:10.5px; flex-shrink:0;}
+  .vacio{color:var(--texto-sec); font-size:13px; text-align:center; padding:20px 10px; line-height:1.5;}
+  .resumen{color:var(--texto-sec); font-size:12.5px; margin-bottom:10px;}
+  .tss-nota{font-size:11px; color:var(--texto-sec); margin-bottom:10px; line-height:1.5;}
+  .toast{position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--ok); color:#04240f;
+    padding:10px 18px; border-radius:99px; font-size:13.5px; font-weight:700; opacity:0; pointer-events:none;
+    transition:opacity .25s, transform .25s; z-index:99;}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(-4px);}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>💾 Backup</h1>
+  <div class="sub">Exportar / restaurar datos guardados en este dispositivo</div>
+  <nav class="tabs">
+    <button id="tabBtnExportar" class="activa" onclick="mostrarTab('exportar')">⬆️ Exportar</button>
+    <button id="tabBtnImportar" onclick="mostrarTab('importar')">⬇️ Importar</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-exportar" class="activa">
+    <div class="card">
+      <h2>Datos en este dispositivo</h2>
+      <input type="text" id="filtroClaves" placeholder="Buscar por nombre..." oninput="renderListaClaves()">
+      <div class="fila" style="margin-bottom:8px;">
+        <button class="btn btn-mini" onclick="seleccionarTodo(true)">Seleccionar todo</button>
+        <button class="btn btn-mini" onclick="seleccionarTodo(false)">Ninguno</button>
+      </div>
+      <div id="listaClaves"></div>
+    </div>
+    <div class="card">
+      <div class="resumen" id="resumenExport"></div>
+      <button class="btn btn-primario" onclick="exportarSeleccion()">⬇️ Descargar backup (.json)</button>
+      <div class="tss-nota">El archivo que se descarga solo tiene las claves que dejaste tildadas arriba. Pasalo al otro dispositivo por Drive, mail o WhatsApp, y ahí usá la pestaña "Importar".</div>
+    </div>
+  </section>
+
+  <section id="tab-importar">
+    <div class="card">
+      <h2>Restaurar desde un backup</h2>
+      <button class="btn btn-secundario" onclick="document.getElementById('inputBackup').click()">📂 Elegir archivo .json</button>
+      <input type="file" id="inputBackup" accept=".json,application/json" style="display:none" onchange="leerArchivoBackup(event)">
+      <div id="previaImportar"></div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+let seleccionExport = new Set();
+let datosImportar = null;
+let seleccionImport = new Set();
+
+function mostrarToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 1800);
+}
+
+function escapeHtml(v){
+  if(v === undefined || v === null) return '';
+  return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatearBytes(n){
+  if(n < 1024) return n + ' B';
+  return (n/1024).toFixed(1) + ' KB';
+}
+
+function hoyISO(){
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off*60000);
+  return local.toISOString().slice(0,10);
+}
+
+/* ============ Lógica pura (testeable sin DOM/localStorage real) ============ */
+
+function listarClaves(storage){
+  const claves = [];
+  for(let i = 0; i < storage.length; i++) claves.push(storage.key(i));
+  return claves.sort();
+}
+
+// Arma el objeto de backup a partir de las claves elegidas.
+function construirBackup(clavesElegidas, storage){
+  const claves = {};
+  clavesElegidas.forEach(k => { claves[k] = storage.getItem(k); });
+  return { version: 1, fecha: new Date().toISOString(), claves };
+}
+
+// Devuelve, de una lista de claves a importar, cuáles ya existen en el storage actual (se van a pisar).
+function detectarPisado(clavesAImportar, storage){
+  return clavesAImportar.filter(k => storage.getItem(k) !== null);
+}
+
+// Aplica la restauración: escribe cada clave elegida en el storage actual. Devuelve la cantidad escrita.
+function aplicarImportacion(clavesElegidas, datosBackup, storage){
+  let n = 0;
+  clavesElegidas.forEach(k => {
+    if(Object.prototype.hasOwnProperty.call(datosBackup.claves, k)){
+      storage.setItem(k, datosBackup.claves[k]);
+      n++;
+    }
+  });
+  return n;
+}
+
+/* ============ Tabs ============ */
+function mostrarTab(nombre){
+  document.getElementById('tab-exportar').classList.toggle('activa', nombre==='exportar');
+  document.getElementById('tab-importar').classList.toggle('activa', nombre==='importar');
+  document.getElementById('tabBtnExportar').classList.toggle('activa', nombre==='exportar');
+  document.getElementById('tabBtnImportar').classList.toggle('activa', nombre==='importar');
+  if(nombre === 'exportar') renderListaClaves();
+}
+
+/* ============ Exportar ============ */
+function renderListaClaves(){
+  const filtro = (document.getElementById('filtroClaves').value || '').toLowerCase();
+  const todas = listarClaves(localStorage);
+  const claves = todas.filter(k => k.toLowerCase().includes(filtro));
+  const cont = document.getElementById('listaClaves');
+
+  if(todas.length === 0){
+    cont.innerHTML = '<div class="vacio">No encontré datos guardados en este dispositivo.</div>';
+  } else if(claves.length === 0){
+    cont.innerHTML = '<div class="vacio">Ninguna clave coincide con la búsqueda.</div>';
+  } else {
+    cont.innerHTML = claves.map(k => {
+      const valor = localStorage.getItem(k) || '';
+      const bytes = new Blob([valor]).size;
+      const checked = seleccionExport.has(k) ? 'checked' : '';
+      return `<label class="item-clave">
+        <input type="checkbox" ${checked} onchange="toggleSeleccionExport(${JSON.stringify(k)})">
+        <span class="nombre">${escapeHtml(k)}</span>
+        <span class="peso">${formatearBytes(bytes)}</span>
+      </label>`;
+    }).join('');
+  }
+  actualizarResumenExport();
+}
+
+function toggleSeleccionExport(key){
+  if(seleccionExport.has(key)) seleccionExport.delete(key); else seleccionExport.add(key);
+  actualizarResumenExport();
+}
+
+function seleccionarTodo(marcar){
+  seleccionExport = marcar ? new Set(listarClaves(localStorage)) : new Set();
+  renderListaClaves();
+}
+
+function actualizarResumenExport(){
+  const n = seleccionExport.size;
+  document.getElementById('resumenExport').textContent =
+    n === 0 ? 'No seleccionaste ninguna clave todavía.' : `${n} clave${n===1?'':'s'} seleccionada${n===1?'':'s'} para exportar.`;
+}
+
+function exportarSeleccion(){
+  if(seleccionExport.size === 0){
+    mostrarToast('⚠️ Elegí al menos una clave para exportar');
+    return;
+  }
+  const backup = construirBackup([...seleccionExport], localStorage);
+  const blob = new Blob([JSON.stringify(backup)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `backup-${hoyISO()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  mostrarToast(`⬇️ Backup descargado (${seleccionExport.size} claves)`);
+}
+
+/* ============ Importar ============ */
+function leerArchivoBackup(event){
+  const archivo = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if(!archivo) return;
+
+  const lector = new FileReader();
+  lector.onload = () => {
+    let datos;
+    try{
+      datos = JSON.parse(lector.result);
+    }catch(e){
+      console.error('Error al parsear el backup', e);
+      mostrarToast('⚠️ No pude leer ese archivo');
+      return;
+    }
+    if(!datos || typeof datos.claves !== 'object' || datos.claves === null){
+      mostrarToast('⚠️ Ese archivo no tiene el formato de backup esperado');
+      return;
+    }
+    datosImportar = datos;
+    seleccionImport = new Set(Object.keys(datos.claves));
+    renderPreviaImportar();
+  };
+  lector.onerror = () => mostrarToast('⚠️ No pude leer ese archivo');
+  lector.readAsText(archivo);
+}
+
+function toggleSeleccionImport(key){
+  if(seleccionImport.has(key)) seleccionImport.delete(key); else seleccionImport.add(key);
+  renderPreviaImportar();
+}
+
+function renderPreviaImportar(){
+  const cont = document.getElementById('previaImportar');
+  if(!datosImportar){ cont.innerHTML = ''; return; }
+
+  const claves = Object.keys(datosImportar.claves).sort();
+  const aPisar = detectarPisado(claves, localStorage);
+  const fechaTexto = (() => {
+    const d = new Date(datosImportar.fecha);
+    return isNaN(d.getTime()) ? datosImportar.fecha : d.toLocaleString('es-AR');
+  })();
+
+  const filas = claves.map(k => {
+    const checked = seleccionImport.has(k) ? 'checked' : '';
+    const yaExiste = localStorage.getItem(k) !== null;
+    return `<label class="item-clave">
+      <input type="checkbox" ${checked} onchange="toggleSeleccionImport(${JSON.stringify(k)})">
+      <span class="nombre">${escapeHtml(k)}</span>
+      ${yaExiste ? '<span class="pisa">pisa datos</span>' : ''}
+    </label>`;
+  }).join('');
+
+  cont.innerHTML = `
+    <div class="tss-nota">Backup del ${escapeHtml(fechaTexto)} — ${claves.length} clave(s). ${aPisar.length} ya existen en este dispositivo y se van a pisar si las dejás tildadas.</div>
+    ${filas}
+    <button class="btn btn-primario" style="margin-top:10px;" onclick="confirmarImportar()">📥 Restaurar seleccionadas</button>
+  `;
+}
+
+function confirmarImportar(){
+  if(!datosImportar) return;
+  if(seleccionImport.size === 0){
+    mostrarToast('⚠️ Elegí al menos una clave para restaurar');
+    return;
+  }
+  const aPisar = detectarPisado([...seleccionImport], localStorage);
+  const mensaje = aPisar.length > 0
+    ? `Vas a pisar ${aPisar.length} clave(s) que ya existen en este dispositivo con los datos del backup. Esto no se puede deshacer. ¿Continuar?`
+    : `¿Restaurar ${seleccionImport.size} clave(s) nuevas en este dispositivo?`;
+  if(!confirm(mensaje)) return;
+
+  const n = aplicarImportacion([...seleccionImport], datosImportar, localStorage);
+  mostrarToast(`✅ Restauradas ${n} clave(s)`);
+  datosImportar = null;
+  seleccionImport = new Set();
+  document.getElementById('previaImportar').innerHTML = '';
+  document.getElementById('inputBackup').value = '';
+}
+
+/* ============ Inicio ============ */
+renderListaClaves();
+</script>
+
+</body>
+</html>
