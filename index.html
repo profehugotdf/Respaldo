@@ -44,6 +44,9 @@
   .vacio{color:var(--texto-sec); font-size:13px; text-align:center; padding:20px 10px; line-height:1.5;}
   .resumen{color:var(--texto-sec); font-size:12.5px; margin-bottom:10px;}
   .tss-nota{font-size:11px; color:var(--texto-sec); margin-bottom:10px; line-height:1.5;}
+  .seccion-idb{margin-top:12px; padding-top:10px; border-top:1px dashed var(--borde); font-size:12px; color:var(--texto-sec);}
+  .aviso{background:#3a2a10; border:1px solid #8a6420; color:#ffd58a; border-radius:10px; padding:10px; font-size:12.5px; line-height:1.5; margin-bottom:10px;}
+  .resultado{font-size:12.5px; line-height:1.6; margin-top:10px;}
   .toast{position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--ok); color:#04240f;
     padding:10px 18px; border-radius:99px; font-size:13.5px; font-weight:700; opacity:0; pointer-events:none;
     transition:opacity .25s, transform .25s; z-index:99;}
@@ -53,7 +56,7 @@
 <body>
 
 <header>
-  <h1>💾 Backup</h1>
+  <h1>💾 Backup · v2</h1>
   <div class="sub">Exportar / restaurar datos guardados en este dispositivo</div>
   <nav class="tabs">
     <button id="tabBtnExportar" class="activa" onclick="mostrarTab('exportar')">⬆️ Exportar</button>
@@ -71,10 +74,12 @@
         <button class="btn btn-mini" onclick="seleccionarTodo(false)">Ninguno</button>
       </div>
       <div id="listaClaves"></div>
+      <div id="listaIDB"></div>
     </div>
     <div class="card">
       <div class="resumen" id="resumenExport"></div>
       <button class="btn btn-primario" onclick="exportarSeleccion()">⬇️ Descargar backup (.json)</button>
+      <div id="resumenDescarga" class="resultado"></div>
       <div class="tss-nota">El archivo que se descarga solo tiene las claves que dejaste tildadas arriba. Pasalo al otro dispositivo por Drive, mail o WhatsApp, y ahí usá la pestaña "Importar".</div>
     </div>
   </section>
@@ -93,6 +98,12 @@
 
 <script>
 "use strict";
+/* Changelog
+   v2: incluye las bases internas (IndexedDB) de todas las apps del sitio, además de localStorage.
+       Bici Indoor (v158+) guarda sus sesiones y rutas en IndexedDB y deja en localStorage solo un resumen
+       marcado con _resumen:true (sin el detalle). Formato de archivo v2: agrega "indexedDB".
+       Restaurar nunca sube la versión de una base existente (rompería a la app dueña) y nunca borra bases.
+   v1: backup y restauración de claves de localStorage. */
 
 let seleccionExport = new Set();
 let datosImportar = null;
@@ -131,10 +142,12 @@ function listarClaves(storage){
 }
 
 // Arma el objeto de backup a partir de las claves elegidas.
-function construirBackup(clavesElegidas, storage){
+function construirBackup(clavesElegidas, storage, basesIDB){
   const claves = {};
   clavesElegidas.forEach(k => { claves[k] = storage.getItem(k); });
-  return { version: 1, fecha: new Date().toISOString(), claves };
+  const b = { version: 2, fecha: new Date().toISOString(), claves };
+  if(basesIDB && basesIDB.length) b.indexedDB = basesIDB;
+  return b;
 }
 
 // Devuelve, de una lista de claves a importar, cuáles ya existen en el storage actual (se van a pisar).
@@ -152,6 +165,105 @@ function aplicarImportacion(clavesElegidas, datosBackup, storage){
     }
   });
   return n;
+}
+
+/* ============ IndexedDB (lógica testeable con un indexedDB simulado) ============ */
+const BASES_CONOCIDAS = ['bici_indoor'];
+function idbId(db, store, key){ return 'idb:' + JSON.stringify([db, store, key]); }
+function reqP(r){ return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+function txFin(tx){ return new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = tx.onabort = () => rej(tx.error || new Error('transacción abortada')); }); }
+function serializable(v){
+  if((typeof Blob !== 'undefined' && v instanceof Blob) || v instanceof ArrayBuffer || ArrayBuffer.isView(v)) return false;
+  try{ JSON.stringify(v); return true; }catch(_){ return false; }
+}
+// Abre una base SIN crearla si no existe (si no existe, cancela la creación).
+function abrirExistente(factory, nombre){
+  return new Promise((res) => {
+    const r = factory.open(nombre);
+    let nueva = false;
+    r.onupgradeneeded = (e) => { if(e.oldVersion === 0){ nueva = true; try{ r.transaction.abort(); }catch(_){} } };
+    r.onsuccess = () => { if(nueva){ try{ r.result.close(); }catch(_){} res(null); } else res(r.result); };
+    r.onerror = () => res(null);
+  });
+}
+// Inventario de TODAS las bases del sitio (genérico: las que se agreguen en el futuro entran solas).
+async function inventarioIDB(factory){
+  const out = { bases: [], omitidos: [], aviso: '' };
+  if(!factory) { out.aviso = 'Este navegador no tiene bases internas (IndexedDB).'; return out; }
+  let nombres;
+  if(typeof factory.databases === 'function'){ nombres = (await factory.databases()).map(d => d.name).filter(Boolean); }
+  else { nombres = BASES_CONOCIDAS.slice(); out.aviso = 'Este navegador no permite listar las bases: solo reviso las conocidas (' + BASES_CONOCIDAS.join(', ') + ').'; }
+  for(const nombre of nombres.sort()){
+    const db = await abrirExistente(factory, nombre);
+    if(!db) continue;
+    const base = { nombre, version: db.version, almacenes: [] };
+    for(const st of Array.from(db.objectStoreNames)){
+      const tx = db.transaction(st, 'readonly'), os = tx.objectStore(st);
+      const keys = await reqP(os.getAllKeys()), vals = await reqP(os.getAll());
+      const entradas = [];
+      keys.forEach((k, i) => { if(serializable(vals[i]) && serializable(k)) entradas.push([k, vals[i]]); else out.omitidos.push(nombre + ' › ' + st + ' › ' + String(k)); });
+      base.almacenes.push({ nombre: st, keyPath: os.keyPath, autoIncrement: !!os.autoIncrement, entradas });
+    }
+    db.close();
+    out.bases.push(base);
+  }
+  return out;
+}
+function tamanioValor(v){ const s = typeof v === 'string' ? v : JSON.stringify(v); return typeof Blob !== 'undefined' ? new Blob([s]).size : s.length; }
+// Filtra el inventario dejando solo las entradas elegidas (ids 'idb:[db,store,key]').
+function filtrarIDB(inv, seleccion){
+  const bases = [];
+  for(const b of inv.bases){
+    const almacenes = [];
+    for(const a of b.almacenes){ const entradas = a.entradas.filter(([k]) => seleccion.has(idbId(b.nombre, a.nombre, k)));
+      if(entradas.length) almacenes.push({ nombre: a.nombre, keyPath: a.keyPath, autoIncrement: a.autoIncrement, entradas }); }
+    if(almacenes.length) bases.push({ nombre: b.nombre, version: b.version, almacenes });
+  }
+  return bases;
+}
+// Restaura las entradas elegidas. Crea la base (con SU versión del backup) solo si no existe. Si la base existe y le
+// falta un almacén, NO sube la versión (la app dueña la abre con versión fija y dejaría de funcionar): avisa y saltea.
+async function restaurarIDB(factory, basesBackup, seleccion){
+  const informe = [];
+  for(const b of basesBackup){
+    const elegidas = b.almacenes.map(a => ({ ...a, entradas: a.entradas.filter(([k]) => seleccion.has(idbId(b.nombre, a.nombre, k))) })).filter(a => a.entradas.length);
+    if(!elegidas.length) continue;
+    let db = await abrirExistente(factory, b.nombre);
+    if(!db){
+      db = await new Promise((res, rej) => { const r = factory.open(b.nombre, b.version || 1);
+        r.onupgradeneeded = () => { for(const a of b.almacenes) if(!r.result.objectStoreNames.contains(a.nombre)) r.result.createObjectStore(a.nombre, a.keyPath != null ? { keyPath: a.keyPath, autoIncrement: a.autoIncrement } : { autoIncrement: a.autoIncrement }); };
+        r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    }
+    for(const a of elegidas){
+      const fila = { base: b.nombre, almacen: a.nombre, escritas: 0, verificadas: 0, error: '' };
+      if(!db.objectStoreNames.contains(a.nombre)){ fila.error = 'a la base le falta este almacén: abrí una vez la app correspondiente y volvé a restaurar'; informe.push(fila); continue; }
+      try{
+        const tx = db.transaction(a.nombre, 'readwrite'), os = tx.objectStore(a.nombre);
+        for(const [k, v] of a.entradas){ if(os.keyPath != null) os.put(v); else os.put(v, k); fila.escritas++; }
+        await txFin(tx);
+        const tr = db.transaction(a.nombre, 'readonly'), or = tr.objectStore(a.nombre);
+        for(const [k, v] of a.entradas){ const back = await reqP(or.get(k)); if(JSON.stringify(back) === JSON.stringify(v)) fila.verificadas++; }
+      }catch(e){ fila.error = e && e.message || String(e); }
+      informe.push(fila);
+    }
+    db.close();
+  }
+  return informe;
+}
+// Avisos al revisar un backup antes de restaurarlo.
+function avisosBackup(datos){
+  const av = [], bases = (datos.indexedDB || []).map(b => b.nombre);
+  for(const [k, v] of Object.entries(datos.claves || {})){
+    let arr = null; try{ arr = JSON.parse(v); }catch(_){}
+    if(Array.isArray(arr) && arr.length && arr.every(x => x && x._resumen)){
+      const app = k.split('_')[0];
+      if(!bases.some(n => n.startsWith(app)))
+        av.push('«' + k + '» en este backup es solo el resumen (sin el detalle de cada sesión) y el archivo no trae la base interna de esa app: no contiene las sesiones completas. Restaurarlo no borra las que ya tengas.');
+    } else if(k === 'bici_sesiones' && Array.isArray(arr) && arr.length && !bases.includes('bici_indoor')){
+      av.push('Backup anterior al cambio de Bici: las sesiones completas vienen en «bici_sesiones». Al abrir Bici, las pasa sola a su base interna, combinándolas con las que ya tengas.');
+    }
+  }
+  return av;
 }
 
 /* ============ Tabs ============ */
@@ -186,23 +298,47 @@ function renderListaClaves(){
       </label>`;
     }).join('');
   }
+  renderListaIDB();
   actualizarResumenExport();
 }
 
+let inventario = { bases: [], omitidos: [], aviso: '' }, inventarioListo = false;
+async function cargarInventario(){
+  try{ inventario = await inventarioIDB(window.indexedDB); }catch(e){ inventario = { bases: [], omitidos: [], aviso: 'No pude leer las bases internas: ' + e.message }; }
+  inventarioListo = true; renderListaIDB(); actualizarResumenExport();
+}
+function idsInventario(){ const ids = []; for(const b of inventario.bases) for(const a of b.almacenes) for(const [k] of a.entradas) ids.push(idbId(b.nombre, a.nombre, k)); return ids; }
+function renderListaIDB(){
+  const cont = document.getElementById('listaIDB'); if(!cont) return;
+  const filtro = (document.getElementById('filtroClaves').value || '').toLowerCase();
+  if(!inventarioListo){ cont.innerHTML = '<div class="seccion-idb">Buscando bases internas…</div>'; return; }
+  let filas = '';
+  for(const b of inventario.bases) for(const a of b.almacenes) for(const [k, v] of a.entradas){
+    const nombre = b.nombre + ' › ' + (a.nombre === 'kv' ? '' : a.nombre + ' › ') + String(k);
+    if(!nombre.toLowerCase().includes(filtro)) continue;
+    const id = idbId(b.nombre, a.nombre, k);
+    filas += `<label class="item-clave"><input type="checkbox" ${seleccionExport.has(id) ? 'checked' : ''} onchange='toggleSeleccionExport(${JSON.stringify(id)})'>
+      <span class="nombre">🗄️ ${escapeHtml(nombre)}</span><span class="peso">${formatearBytes(tamanioValor(v))}</span></label>`;
+  }
+  cont.innerHTML = '<div class="seccion-idb">Bases internas (IndexedDB) — acá están las sesiones completas de las apps que ya migraron (Bici).</div>'
+    + (inventario.aviso ? '<div class="aviso">' + escapeHtml(inventario.aviso) + '</div>' : '')
+    + (filas || '<div class="vacio">No hay bases internas en este dispositivo.</div>')
+    + (inventario.omitidos.length ? '<div class="aviso">No se pueden copiar (no son texto/JSON): ' + escapeHtml(inventario.omitidos.join(', ')) + '</div>' : '');
+}
 function toggleSeleccionExport(key){
   if(seleccionExport.has(key)) seleccionExport.delete(key); else seleccionExport.add(key);
   actualizarResumenExport();
 }
 
 function seleccionarTodo(marcar){
-  seleccionExport = marcar ? new Set(listarClaves(localStorage)) : new Set();
+  seleccionExport = marcar ? new Set([...listarClaves(localStorage), ...idsInventario()]) : new Set();
   renderListaClaves();
 }
 
 function actualizarResumenExport(){
-  const n = seleccionExport.size;
+  const n = seleccionExport.size, nIdb = [...seleccionExport].filter(k => k.startsWith('idb:')).length;
   document.getElementById('resumenExport').textContent =
-    n === 0 ? 'No seleccionaste ninguna clave todavía.' : `${n} clave${n===1?'':'s'} seleccionada${n===1?'':'s'} para exportar.`;
+    n === 0 ? 'No seleccionaste nada todavía.' : `${n - nIdb} clave(s) y ${nIdb} dato(s) de bases internas seleccionados para exportar.`;
 }
 
 function exportarSeleccion(){
@@ -210,7 +346,9 @@ function exportarSeleccion(){
     mostrarToast('⚠️ Elegí al menos una clave para exportar');
     return;
   }
-  const backup = construirBackup([...seleccionExport], localStorage);
+  const clavesLS = [...seleccionExport].filter(k => !k.startsWith('idb:'));
+  const bases = filtrarIDB(inventario, seleccionExport);
+  const backup = construirBackup(clavesLS, localStorage, bases);
   const blob = new Blob([JSON.stringify(backup)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -220,7 +358,11 @@ function exportarSeleccion(){
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 2000);
-  mostrarToast(`⬇️ Backup descargado (${seleccionExport.size} claves)`);
+  mostrarToast(`⬇️ Backup descargado`);
+  const lineas = [`<b>Backup descargado:</b> ${clavesLS.length} clave(s) del almacenamiento común.`];
+  for(const b of bases) for(const a of b.almacenes) lineas.push(`🗄️ ${escapeHtml(b.nombre)} › ${escapeHtml(a.nombre)}: ${a.entradas.length} dato(s), ${formatearBytes(a.entradas.reduce((s, [, v]) => s + tamanioValor(v), 0))}`);
+  if(!bases.some(b => b.nombre === 'bici_indoor')) lineas.push('<span style="color:var(--mal)">⚠️ No incluye «bici_indoor»: las sesiones completas de Bici NO están en este backup.</span>');
+  document.getElementById('resumenDescarga').innerHTML = lineas.join('<br>');
 }
 
 /* ============ Importar ============ */
@@ -245,6 +387,7 @@ function leerArchivoBackup(event){
     }
     datosImportar = datos;
     seleccionImport = new Set(Object.keys(datos.claves));
+    for(const b of (datos.indexedDB || [])) for(const a of (b.almacenes || [])) for(const [k] of (a.entradas || [])) seleccionImport.add(idbId(b.nombre, a.nombre, k));
     renderPreviaImportar();
   };
   lector.onerror = () => mostrarToast('⚠️ No pude leer ese archivo');
@@ -277,14 +420,23 @@ function renderPreviaImportar(){
     </label>`;
   }).join('');
 
+  let filasIdb = '';
+  for(const b of (datosImportar.indexedDB || [])) for(const a of (b.almacenes || [])) for(const [k, v] of (a.entradas || [])){
+    const id = idbId(b.nombre, a.nombre, k);
+    filasIdb += `<label class="item-clave"><input type="checkbox" ${seleccionImport.has(id) ? 'checked' : ''} onchange='toggleSeleccionImport(${JSON.stringify(id)})'>
+      <span class="nombre">🗄️ ${escapeHtml(b.nombre + ' › ' + (a.nombre === 'kv' ? '' : a.nombre + ' › ') + String(k))}</span><span class="peso">${formatearBytes(tamanioValor(v))}</span></label>`;
+  }
+  const avisos = avisosBackup(datosImportar).map(t => '<div class="aviso">⚠️ ' + escapeHtml(t) + '</div>').join('');
   cont.innerHTML = `
-    <div class="tss-nota">Backup del ${escapeHtml(fechaTexto)} — ${claves.length} clave(s). ${aPisar.length} ya existen en este dispositivo y se van a pisar si las dejás tildadas.</div>
+    ${avisos}
+    <div class="tss-nota">Backup del ${escapeHtml(fechaTexto)} — ${claves.length} clave(s)${filasIdb ? ' y datos de bases internas' : ''}. ${aPisar.length} clave(s) ya existen en este dispositivo y se van a pisar si las dejás tildadas. <b>Cerrá las otras apps antes de restaurar.</b></div>
     ${filas}
+    ${filasIdb ? '<div class="seccion-idb">Bases internas (IndexedDB)</div>' + filasIdb : ''}
     <button class="btn btn-primario" style="margin-top:10px;" onclick="confirmarImportar()">📥 Restaurar seleccionadas</button>
   `;
 }
 
-function confirmarImportar(){
+async function confirmarImportar(){
   if(!datosImportar) return;
   if(seleccionImport.size === 0){
     mostrarToast('⚠️ Elegí al menos una clave para restaurar');
@@ -296,16 +448,27 @@ function confirmarImportar(){
     : `¿Restaurar ${seleccionImport.size} clave(s) nuevas en este dispositivo?`;
   if(!confirm(mensaje)) return;
 
-  const n = aplicarImportacion([...seleccionImport], datosImportar, localStorage);
-  mostrarToast(`✅ Restauradas ${n} clave(s)`);
+  const n = aplicarImportacion([...seleccionImport].filter(k => !k.startsWith('idb:')), datosImportar, localStorage);
+  let informe = [];
+  if((datosImportar.indexedDB || []).length){
+    try{ informe = await restaurarIDB(window.indexedDB, datosImportar.indexedDB, seleccionImport); }
+    catch(e){ informe = [{ base: '—', almacen: '—', escritas: 0, verificadas: 0, error: e.message }]; }
+  }
+  const lineas = [`<b>Restauración terminada.</b> ${n} clave(s) del almacenamiento común.`];
+  for(const f of informe) lineas.push(f.error ? `<span style="color:var(--mal)">❌ ${escapeHtml(f.base)} › ${escapeHtml(f.almacen)}: ${escapeHtml(f.error)}</span>`
+    : `${f.verificadas === f.escritas ? '✅' : '⚠️'} ${escapeHtml(f.base)} › ${escapeHtml(f.almacen)}: ${f.escritas} dato(s) escrito(s), ${f.verificadas} verificado(s) leyéndolos de vuelta`);
+  lineas.push('Al abrir cada app, regenera sola su resumen para Mi plan.');
+  mostrarToast(`✅ Restauración terminada`);
   datosImportar = null;
   seleccionImport = new Set();
-  document.getElementById('previaImportar').innerHTML = '';
+  document.getElementById('previaImportar').innerHTML = '<div class="resultado">' + lineas.join('<br>') + '</div>';
   document.getElementById('inputBackup').value = '';
+  cargarInventario();
 }
 
 /* ============ Inicio ============ */
 renderListaClaves();
+cargarInventario();
 </script>
 
 </body>
